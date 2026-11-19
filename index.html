@@ -59,22 +59,16 @@ button:disabled{opacity:.65;cursor:wait}
  <div class="card">
   <h3>👤 ملفي الشخصي</h3>
   <p id="myName"></p>
-  <p>رمز الصداقة الخاص بي:</p>
-  <h2 id="myCode" style="color:#45d8e5"></h2>
-  <button id="copyCode" class="secondary">نسخ رمز الصداقة</button>
   <button id="logout" class="danger">تسجيل الخروج</button>
  </div>
 
- <div class="card">
-  <h3>🔎 البحث عن صديق</h3>
-  <input id="friendCode" placeholder="أدخل رمز الصداقة">
-  <button id="searchFriend">بحث</button>
-  <div id="searchResult"></div>
- </div>
-
- <div class="card">
-  <h3>👥 أصدقائي</h3>
-  <div id="friends">لا يوجد أصدقاء بعد</div>
+ <div class="card" style="text-align:center">
+  <h3>🎲 دردشة عشوائية</h3>
+  <p>اضغط للبحث عن شخص آخر متاح للدردشة الآن.</p>
+  <button id="findRandom">🔎 ابحث عن شخص</button>
+  <button id="cancelSearch" class="secondary hidden">إلغاء البحث</button>
+  <button id="nextRandom" class="secondary hidden">شخص آخر</button>
+  <p id="randomStatus" aria-live="polite">أنت غير متصل بالبحث العشوائي.</p>
  </div>
 
  <div id="chatBox" class="card hidden">
@@ -105,9 +99,9 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
 
 import {
- getFirestore,doc,setDoc,getDoc,updateDoc,
+ getFirestore,doc,setDoc,getDoc,updateDoc,runTransaction,
  collection,addDoc,getDocs,onSnapshot,query,where,
- orderBy,serverTimestamp,arrayUnion
+ orderBy,serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
 
 import {
@@ -133,7 +127,9 @@ const storage=getStorage(appFirebase);
 let currentUser=null;
 let currentChat=null;
 let stopMessages=null;
-let stopFriends=null;
+let stopQueue=null;
+let randomSearching=false;
+let randomOpening=false;
 let currentFriend=null;
 
 const $ = id => document.getElementById(id);
@@ -156,10 +152,6 @@ setAuthMode("login");
 
 function status(message){
  $("status").textContent=message;
-}
-
-function makeCode(){
- return "TAH"+Math.random().toString(36).substring(2,9).toUpperCase();
 }
 
 // تحويل أخطاء Firebase إلى رسائل واضحة
@@ -233,7 +225,7 @@ onAuthStateChanged(auth,async user=>{
   $("app").classList.remove("hidden");
   try{
    await loadProfile();
-   listenFriends();
+   listenRandomQueue();
   }catch(e){
    status("تعذر تحميل الملف الشخصي: "+(e.message||e));
   }
@@ -242,137 +234,148 @@ onAuthStateChanged(auth,async user=>{
   $("app").classList.add("hidden");
   $("auth").classList.remove("hidden");
   if(stopMessages)stopMessages();
-  if(stopFriends)stopFriends();
+  if(stopQueue)stopQueue();
   stopMessages=null;
-  stopFriends=null;
+  stopQueue=null;
  }
 });
 
-// الملف الشخصي
+// الملف الشخصي دون رمز صداقة
 async function loadProfile(){
  const userRef=doc(db,"users",currentUser.uid);
  const snap=await getDoc(userRef);
  const oldData=snap.exists()?snap.data():{};
-
- // استكمال بيانات الحسابات القديمة دون حذف بياناتها
  const name=oldData.name || (currentUser.email ? currentUser.email.split("@")[0] : "مستخدم");
- const friendCode=oldData.friendCode || makeCode();
- const friends=Array.isArray(oldData.friends)?oldData.friends:[];
-
  await setDoc(userRef,{
   name:name,
   email:oldData.email || currentUser.email || "",
-  friendCode:friendCode,
-  friends:friends,
   createdAt:oldData.createdAt || serverTimestamp()
  },{merge:true});
-
  $("myName").textContent="الاسم: "+name;
- $("myCode").textContent=friendCode;
 }
 
-// نسخ الرمز
-$("copyCode").onclick=async()=>{
+// الاستماع إلى حالة المطابقة
+function listenRandomQueue(){
+ if(stopQueue)stopQueue();
+ const queueRef=doc(db,"randomQueue",currentUser.uid);
+ stopQueue=onSnapshot(queueRef,async snap=>{
+  if(!snap.exists())return;
+  const data=snap.data();
+  if(data.status==="matched" && data.chatId && data.peerId && !randomOpening){
+   randomOpening=true;
+   randomSearching=false;
+   $("randomStatus").textContent="تم العثور على شخص! جاري فتح المحادثة...";
+   $("findRandom").classList.add("hidden");
+   $("cancelSearch").classList.add("hidden");
+   $("nextRandom").classList.remove("hidden");
+   try{
+    const peerSnap=await getDoc(doc(db,"users",data.peerId));
+    const peerName=peerSnap.exists()?(peerSnap.data().name||"مستخدم جديد"):"مستخدم جديد";
+    await openChat(data.peerId,peerName,data.chatId);
+    $("randomStatus").textContent="أنت الآن في دردشة عشوائية.";
+   }catch(e){
+    $("randomStatus").textContent="تعذر فتح المحادثة: "+(e.message||e);
+    randomOpening=false;
+   }
+  }
+ });
+}
+
+// البحث عن شخص ينتظر
+$("findRandom").onclick=async()=>{
+ if(!currentUser || randomSearching || currentChat)return;
+ randomSearching=true;
+ randomOpening=false;
+ $("findRandom").disabled=true;
+ $("findRandom").textContent="جاري البحث...";
+ $("randomStatus").textContent="نبحث عن شخص متاح للدردشة...";
+ $("cancelSearch").classList.remove("hidden");
+ $("nextRandom").classList.add("hidden");
+ const myQueueRef=doc(db,"randomQueue",currentUser.uid);
  try{
-  await navigator.clipboard.writeText($("myCode").textContent);
-  status("تم نسخ رمز الصداقة");
+  let matched=false;
+  // نبحث عن منتظرين خارج المعاملة، ثم نتحقق داخلها أن المرشح ما زال ينتظر.
+  for(let attempt=0;attempt<3 && !matched;attempt++){
+   const waitingQuery=query(collection(db,"randomQueue"),where("status","==","waiting"));
+   const waitingSnap=await getDocs(waitingQuery);
+   const candidate=waitingSnap.docs.find(item=>item.id!==currentUser.uid);
+   if(!candidate)break;
+
+   try{
+    await runTransaction(db,async transaction=>{
+     const freshCandidate=await transaction.get(candidate.ref);
+     if(!freshCandidate.exists() || freshCandidate.data().status!=="waiting"){
+      throw new Error("MATCH_ALREADY_TAKEN");
+     }
+     const chatRef=doc(collection(db,"chats"));
+     transaction.set(chatRef,{
+      members:[currentUser.uid,candidate.id],
+      random:true,
+      createdAt:serverTimestamp(),
+      updatedAt:serverTimestamp()
+     });
+     transaction.set(candidate.ref,{
+      status:"matched",peerId:currentUser.uid,chatId:chatRef.id,
+      matchedAt:serverTimestamp()
+     },{merge:true});
+     transaction.set(myQueueRef,{
+      uid:currentUser.uid,status:"matched",peerId:candidate.id,
+      chatId:chatRef.id,matchedAt:serverTimestamp()
+     });
+    });
+    matched=true;
+   }catch(matchError){
+    if(matchError.message!=="MATCH_ALREADY_TAKEN")throw matchError;
+   }
+  }
+
+  if(!matched){
+   await setDoc(myQueueRef,{
+    uid:currentUser.uid,status:"waiting",createdAt:serverTimestamp()
+   });
+  }
+  const latest=await getDoc(myQueueRef);
+  if(latest.exists() && latest.data().status==="waiting"){
+   $("randomStatus").textContent="أنت في قائمة الانتظار. سنفتح المحادثة عند العثور على شخص.";
+  }
  }catch(e){
-  status("تعذر النسخ في هذا المتصفح");
+  randomSearching=false;
+  $("randomStatus").textContent="تعذر بدء البحث: "+(e.message||e);
+  $("findRandom").classList.remove("hidden");
+  $("findRandom").disabled=false;
+  $("findRandom").textContent="🔎 ابحث عن شخص";
+  $("cancelSearch").classList.add("hidden");
  }
 };
 
-// البحث عن صديق
-$("searchFriend").onclick=async()=>{
- try{
-  const code=$("friendCode").value.trim().toUpperCase();
-  if(!code)return;
-
-  const q=query(
-   collection(db,"users"),
-   where("friendCode","==",code)
-  );
-
-  const result=await getDocs(q);
-  $("searchResult").innerHTML="";
-
-  if(result.empty){
-   $("searchResult").textContent="لم يتم العثور على هذا الصديق";
-   return;
-  }
-
-  const friendDoc=result.docs[0];
-  const friend=friendDoc.data();
-  const friendId=friendDoc.id;
-
-  if(friendId===currentUser.uid){
-   $("searchResult").textContent="هذا رمز حسابك أنت";
-   return;
-  }
-
-  const box=document.createElement("div");
-  box.className="friend";
-  const name=document.createElement("b");
-  name.textContent=friend.name;
-  const button=document.createElement("button");
-  button.textContent="إضافة الصديق وفتح المحادثة";
-  button.onclick=()=>addFriend(friendId,friend.name);
-
-  box.append(name,button);
-  $("searchResult").append(box);
-
- }catch(e){
-  status("خطأ: "+e.message);
+// إلغاء البحث أو مغادرة الدردشة
+async function leaveRandomChat(){
+ if(stopMessages)stopMessages();
+ stopMessages=null;
+ currentChat=null;
+ currentFriend=null;
+ randomOpening=false;
+ $("chatBox").classList.add("hidden");
+ $("messages").innerHTML="";
+ $("messageText").value="";
+ $("mediaStatus").textContent="";
+ if(currentUser){
+  try{
+   await setDoc(doc(db,"randomQueue",currentUser.uid),{
+    uid:currentUser.uid,status:"idle",updatedAt:serverTimestamp()
+   },{merge:true});
+  }catch(e){console.log(e);}
  }
-};
-
-// إضافة صديق
-async function addFriend(friendId,name){
- try{
-  await updateDoc(doc(db,"users",currentUser.uid),{
-   friends:arrayUnion(friendId)
-  });
-
-  await openChat(friendId,name);
-  status("تمت إضافة الصديق");
- }catch(e){
-  status("تعذرت إضافة الصديق: "+e.message);
- }
+ randomSearching=false;
+ $("randomStatus").textContent="انتهت المحادثة. يمكنك البحث عن شخص آخر.";
+ $("findRandom").classList.remove("hidden");
+ $("findRandom").disabled=false;
+ $("findRandom").textContent="🔎 ابحث عن شخص";
+ $("cancelSearch").classList.add("hidden");
+ $("nextRandom").classList.add("hidden");
 }
-
-// عرض الأصدقاء
-async function listenFriends(){
- if(stopFriends)stopFriends();
-
- stopFriends=onSnapshot(
-  doc(db,"users",currentUser.uid),
-  async snap=>{
-   if(!snap.exists())return;
-   const ids=snap.data().friends||[];
-   $("friends").innerHTML="";
-
-   if(ids.length===0){
-    $("friends").textContent="لا يوجد أصدقاء بعد";
-    return;
-   }
-
-   for(const id of ids){
-    try{
-     const friendSnap=await getDoc(doc(db,"users",id));
-     if(!friendSnap.exists())continue;
-
-     const name=friendSnap.data().name||"صديق";
-     const item=document.createElement("div");
-     item.className="friend";
-     item.textContent="👤 "+name;
-     item.onclick=()=>openChat(id,name);
-     $("friends").append(item);
-    }catch(e){
-     console.log(e);
-    }
-   }
-  }
- );
-}
+$("cancelSearch").onclick=leaveRandomChat;
+$("nextRandom").onclick=leaveRandomChat;
 
 // إنشاء معرف المحادثة
 function chatIdFor(a,b){
@@ -380,10 +383,10 @@ function chatIdFor(a,b){
 }
 
 // فتح المحادثة
-async function openChat(friendId,name){
+async function openChat(friendId,name,chatIdOverride=null){
  try{
   currentFriend=friendId;
-  currentChat=chatIdFor(currentUser.uid,friendId);
+  currentChat=chatIdOverride || chatIdFor(currentUser.uid,friendId);
 
   const chatRef=doc(db,"chats",currentChat);
 
@@ -530,13 +533,7 @@ $("mediaFile").onchange=async()=>{
 };
 
 // إغلاق المحادثة
-$("closeChat").onclick=()=>{
- if(stopMessages)stopMessages();
- stopMessages=null;
- currentChat=null;
- currentFriend=null;
- $("chatBox").classList.add("hidden");
-};
+$("closeChat").onclick=leaveRandomChat;
 
 // تسجيل الخروج
 $("logout").onclick=async()=>{
