@@ -1,0 +1,573 @@
+
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TahaChat</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#101827;color:white;font-family:Arial}
+header{background:#087e8b;padding:17px;text-align:center;font-size:24px;font-weight:bold}
+.container{max-width:650px;margin:auto;padding:15px}
+.card{background:#1c293b;padding:15px;border-radius:12px;margin:12px 0}
+input,button{width:100%;padding:13px;margin:6px 0;border:0;border-radius:8px;font-size:16px}
+input{background:#fff;color:#111}
+button{background:#087e8b;color:white;font-weight:bold;cursor:pointer}
+button.secondary{background:#35445b}
+button.danger{background:#a83232}
+.hidden{display:none}
+#messages{height:300px;overflow-y:auto;background:#111b29;padding:10px;border-radius:10px}
+.msg{background:#087e8b;padding:10px;border-radius:10px;margin:7px 0;max-width:85%;overflow-wrap:anywhere}
+.mine{background:#31536c;margin-right:auto}
+.msg small{display:block;color:#d5e8ed;font-size:11px;margin-top:5px}
+.msg video,.msg img{max-width:100%;max-height:220px;border-radius:8px}
+.row{display:flex;gap:7px}
+.row button{flex:1}
+h3{margin-top:5px}
+.friend{background:#35445b;padding:12px;border-radius:8px;margin:6px 0;cursor:pointer}
+#status{color:#ffd36a;font-size:13px}
+#auth .card{transition:background .2s,border-color .2s}
+#auth.auth-register .card{background:#241d3b;border:2px solid #8b5cf6}
+#auth.auth-register #register{background:#7c3aed}
+#auth.auth-register #authTitle{color:#d8b4fe}
+#auth #switchAuthMode{background:transparent;border:1px solid #6b7b91;color:#dce7f3}
+#auth.auth-register #switchAuthMode{border-color:#a78bfa;color:#e9d5ff}
+button:disabled{opacity:.65;cursor:wait}
+</style>
+</head>
+<body>
+
+<header>💬 TahaChat</header>
+
+<div class="container">
+
+<div id="auth">
+ <div class="card">
+  <h3 id="authTitle">🔐 تسجيل الدخول</h3>
+  <input id="email" type="email" placeholder="البريد الإلكتروني" autocomplete="email">
+  <input id="password" type="password" placeholder="كلمة المرور" autocomplete="current-password">
+  <button id="login" type="button">دخول إلى حسابي</button>
+  <button id="register" type="button" class="hidden">إنشاء الحساب</button>
+  <button id="switchAuthMode" type="button" class="secondary">ليس لديك حساب؟ إنشاء حساب جديد</button>
+  <p id="authStatus" aria-live="polite"></p>
+ </div>
+</div>
+
+<div id="app" class="hidden">
+
+ <div class="card">
+  <h3>👤 ملفي الشخصي</h3>
+  <p id="myName"></p>
+  <button id="logout" class="danger">تسجيل الخروج</button>
+ </div>
+
+ <div class="card" style="text-align:center">
+  <h3>🎲 دردشة عشوائية</h3>
+  <p>اضغط للبحث عن شخص آخر متاح للدردشة الآن.</p>
+  <button id="findRandom">🔎 ابحث عن شخص</button>
+  <button id="cancelSearch" class="secondary hidden">إلغاء البحث</button>
+  <button id="nextRandom" class="secondary hidden">شخص آخر</button>
+  <p id="randomStatus" aria-live="polite">أنت غير متصل بالبحث العشوائي.</p>
+ </div>
+
+ <div id="chatBox" class="card hidden">
+  <h3 id="chatTitle">المحادثة</h3>
+  <div id="messages"></div>
+  <input id="messageText" placeholder="اكتب رسالتك هنا">
+  <button id="sendMessage">إرسال الرسالة</button>
+  <div class="row">
+   <button id="chooseMedia" class="secondary">📷 صورة أو فيديو</button>
+   <input id="mediaFile" type="file" accept="image/*,video/*" hidden>
+  </div>
+  <p id="mediaStatus"></p>
+  <button id="closeChat" class="secondary">إغلاق المحادثة</button>
+ </div>
+
+ <p id="status"></p>
+</div>
+</div>
+
+<script type="module">
+import {initializeApp}
+from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+
+import {
+ getAuth,onAuthStateChanged,
+ createUserWithEmailAndPassword,
+ signInWithEmailAndPassword,signOut
+} from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+
+import {
+ getFirestore,doc,setDoc,getDoc,updateDoc,runTransaction,
+ collection,addDoc,getDocs,onSnapshot,query,where,
+ orderBy,serverTimestamp
+} from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+
+import {
+ getStorage,ref,uploadBytes,getDownloadURL
+} from "https://www.gstatic.com/firebasejs/11.10.0/firebase-storage.js";
+
+// إعدادات Firebase
+const firebaseConfig = {
+ apiKey: "AIzaSyA-SPlWBw-1uTmv0YlChSPmFD0p4fLcqWw",
+ authDomain: "tahachat-8eb04.firebaseapp.com",
+ projectId: "tahachat-8eb04",
+ storageBucket: "tahachat-8eb04.firebasestorage.app",
+ messagingSenderId: "667215962422",
+ appId: "1:667215962422:web:ae5dc018b15f661ccf9397",
+ measurementId: "G-JY2LNWW3ST"
+};
+
+const appFirebase=initializeApp(firebaseConfig);
+const auth=getAuth(appFirebase);
+const db=getFirestore(appFirebase);
+const storage=getStorage(appFirebase);
+
+let currentUser=null;
+let currentChat=null;
+let stopMessages=null;
+let stopQueue=null;
+let randomSearching=false;
+let randomOpening=false;
+let currentFriend=null;
+
+const $ = id => document.getElementById(id);
+
+// تبديل واضح بين واجهتي الدخول وإنشاء الحساب
+let authMode="login";
+function setAuthMode(mode){
+ authMode=mode;
+ const registering=mode==="register";
+ $("auth").classList.toggle("auth-register",registering);
+ $("authTitle").textContent=registering?"✨ إنشاء حساب جديد":"🔐 تسجيل الدخول";
+ $("login").classList.toggle("hidden",registering);
+ $("register").classList.toggle("hidden",!registering);
+ $("switchAuthMode").textContent=registering?"لديك حساب؟ تسجيل الدخول":"ليس لديك حساب؟ إنشاء حساب جديد";
+ $("password").setAttribute("autocomplete",registering?"new-password":"current-password");
+ $("authStatus").textContent=registering?"أدخل بريداً جديداً وكلمة مرور من 6 أحرف على الأقل.":"أدخل بيانات حسابك للدخول.";
+}
+$("switchAuthMode").onclick=()=>setAuthMode(authMode==="login"?"register":"login");
+setAuthMode("login");
+
+function status(message){
+ $("status").textContent=message;
+}
+
+// تحويل أخطاء Firebase إلى رسائل واضحة
+function authErrorMessage(error){
+ const code=error && error.code ? error.code : "";
+ const messages={
+  "auth/invalid-email":"البريد الإلكتروني غير صحيح.",
+  "auth/email-already-in-use":"هذا البريد مسجل من قبل. جرّب تسجيل الدخول.",
+  "auth/weak-password":"كلمة المرور ضعيفة. استعمل 6 أحرف على الأقل.",
+  "auth/operation-not-allowed":"تسجيل البريد وكلمة المرور غير مفعّل في Firebase Authentication.",
+  "auth/network-request-failed":"تعذر الاتصال بالإنترنت. تحقق من الاتصال ثم أعد المحاولة.",
+  "auth/too-many-requests":"محاولات كثيرة. انتظر قليلاً ثم أعد المحاولة.",
+  "auth/invalid-credential":"البريد أو كلمة المرور غير صحيحة.",
+  "permission-denied":"تم إنشاء الحساب، لكن صلاحية Firestore تمنع حفظ الملف الشخصي. راجع قواعد Firestore."
+ };
+ return messages[code] || (error && error.message) || "حدث خطأ غير معروف.";
+}
+
+// إنشاء حساب جديد
+$("register").onclick=async()=>{
+ const button=$("register");
+ const email=$("email").value.trim();
+ const password=$("password").value;
+ $("authStatus").textContent="";
+
+ if(!email || !$("email").checkValidity()){
+  $("authStatus").textContent="أدخل بريداً إلكترونياً صحيحاً.";
+  return;
+ }
+ if(password.length<6){
+  $("authStatus").textContent="كلمة المرور يجب أن تكون 6 أحرف على الأقل.";
+  return;
+ }
+
+ button.disabled=true;
+ button.textContent="جاري إنشاء الحساب...";
+ try{
+  // لا ننشئ وثيقة المستخدم هنا؛ onAuthStateChanged ثم loadProfile
+  // ينشئانها مرة واحدة لتجنب تعارض الكتابة عند تسجيل الحساب الجديد.
+  await createUserWithEmailAndPassword(auth,email,password);
+  $("authStatus").textContent="تم إنشاء الحساب بنجاح. جاري فتح التطبيق...";
+ }catch(e){
+  $("authStatus").textContent=authErrorMessage(e);
+ }finally{
+  button.disabled=false;
+  button.textContent="إنشاء الحساب";
+ }
+};
+
+// تسجيل الدخول
+$("login").onclick=async()=>{
+ const button=$("login");
+ $("authStatus").textContent="";
+ button.disabled=true;
+ button.textContent="جاري الدخول...";
+ try{
+  await signInWithEmailAndPassword(auth,$("email").value.trim(),$("password").value);
+ }catch(e){
+  $("authStatus").textContent=authErrorMessage(e);
+ }finally{
+  button.disabled=false;
+  button.textContent="دخول إلى حسابي";
+ }
+};
+
+// متابعة حالة الحساب
+onAuthStateChanged(auth,async user=>{
+ if(user){
+  currentUser=user;
+  $("auth").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  try{
+   await loadProfile();
+   listenRandomQueue();
+  }catch(e){
+   status("تعذر تحميل الملف الشخصي: "+(e.message||e));
+  }
+ }else{
+  currentUser=null;
+  $("app").classList.add("hidden");
+  $("auth").classList.remove("hidden");
+  if(stopMessages)stopMessages();
+  if(stopQueue)stopQueue();
+  stopMessages=null;
+  stopQueue=null;
+ }
+});
+
+// الملف الشخصي دون رمز صداقة
+async function loadProfile(){
+ const userRef=doc(db,"users",currentUser.uid);
+ const snap=await getDoc(userRef);
+ const oldData=snap.exists()?snap.data():{};
+ const name=oldData.name || (currentUser.email ? currentUser.email.split("@")[0] : "مستخدم");
+ await setDoc(userRef,{
+  name:name,
+  email:oldData.email || currentUser.email || "",
+  createdAt:oldData.createdAt || serverTimestamp()
+ },{merge:true});
+ $("myName").textContent="الاسم: "+name;
+}
+
+// الاستماع إلى حالة المطابقة
+function listenRandomQueue(){
+ if(stopQueue)stopQueue();
+ const queueRef=doc(db,"randomQueue",currentUser.uid);
+ stopQueue=onSnapshot(queueRef,async snap=>{
+  if(!snap.exists())return;
+  const data=snap.data();
+  if(data.status==="matched" && data.chatId && data.peerId && !randomOpening){
+   randomOpening=true;
+   randomSearching=false;
+   $("randomStatus").textContent="تم العثور على شخص! جاري فتح المحادثة...";
+   $("findRandom").classList.add("hidden");
+   $("cancelSearch").classList.add("hidden");
+   $("nextRandom").classList.remove("hidden");
+   try{
+    const peerSnap=await getDoc(doc(db,"users",data.peerId));
+    const peerName=peerSnap.exists()?(peerSnap.data().name||"مستخدم جديد"):"مستخدم جديد";
+    await openChat(data.peerId,peerName,data.chatId);
+    $("randomStatus").textContent="أنت الآن في دردشة عشوائية.";
+   }catch(e){
+    $("randomStatus").textContent="تعذر فتح المحادثة: "+(e.message||e);
+    randomOpening=false;
+   }
+  }
+ });
+}
+
+// البحث عن شخص ينتظر
+$("findRandom").onclick=async()=>{
+ if(!currentUser || randomSearching || currentChat)return;
+ randomSearching=true;
+ randomOpening=false;
+ $("findRandom").disabled=true;
+ $("findRandom").textContent="جاري البحث...";
+ $("randomStatus").textContent="نبحث عن شخص متاح للدردشة...";
+ $("cancelSearch").classList.remove("hidden");
+ $("nextRandom").classList.add("hidden");
+ const myQueueRef=doc(db,"randomQueue",currentUser.uid);
+ try{
+  // نسجل المستخدم في قائمة الانتظار أولاً حتى تكون وثيقته موجودة
+  // ويمكن تحديثها إلى matched داخل معاملة المطابقة.
+  await setDoc(myQueueRef,{
+   uid:currentUser.uid,
+   status:"waiting",
+   createdAt:serverTimestamp()
+  });
+
+  let matched=false;
+  for(let attempt=0;attempt<5 && !matched;attempt++){
+   const waitingQuery=query(
+    collection(db,"randomQueue"),
+    where("status","==","waiting")
+   );
+   const waitingSnap=await getDocs(waitingQuery);
+   const candidate=waitingSnap.docs.find(item=>item.id!==currentUser.uid);
+   if(!candidate)break;
+
+   try{
+    const result=await runTransaction(db,async transaction=>{
+     // نقرأ وثيقتينا معاً قبل أي كتابة لمنع مطابقة الشخص مرتين.
+     const mySnap=await transaction.get(myQueueRef);
+     const candidateSnap=await transaction.get(candidate.ref);
+
+     if(mySnap.exists() && mySnap.data().status==="matched"){
+      return "already-matched";
+     }
+     if(!mySnap.exists() || mySnap.data().status!=="waiting" ||
+        !candidateSnap.exists() || candidateSnap.data().status!=="waiting"){
+      return "taken";
+     }
+
+     const chatRef=doc(collection(db,"chats"));
+     transaction.set(chatRef,{
+      members:[currentUser.uid,candidate.id],
+      random:true,
+      createdAt:serverTimestamp(),
+      updatedAt:serverTimestamp()
+     });
+     transaction.set(candidate.ref,{
+      uid:candidate.id,
+      status:"matched",
+      peerId:currentUser.uid,
+      chatId:chatRef.id,
+      matchedAt:serverTimestamp()
+     },{merge:true});
+     transaction.set(myQueueRef,{
+      uid:currentUser.uid,
+      status:"matched",
+      peerId:candidate.id,
+      chatId:chatRef.id,
+      matchedAt:serverTimestamp()
+     },{merge:true});
+     return "matched";
+    });
+
+    if(result==="matched" || result==="already-matched"){
+     matched=true;
+    }
+   }catch(matchError){
+    throw matchError;
+   }
+  }
+
+  // إذا لم نجد أحداً، تبقى وثيقتنا waiting ليستطيع الهاتف الآخر العثور علينا.
+  const latest=await getDoc(myQueueRef);
+  if(latest.exists() && latest.data().status==="waiting"){
+   $("randomStatus").textContent="أنت في قائمة الانتظار. سنفتح المحادثة عند العثور على شخص.";
+  }else if(latest.exists() && latest.data().status==="matched"){
+   $("randomStatus").textContent="تم العثور على شخص! جاري فتح المحادثة...";
+  }
+ }catch(e){
+  randomSearching=false;
+  $("randomStatus").textContent="تعذر بدء البحث: "+(e.message||e);
+  $("findRandom").classList.remove("hidden");
+  $("findRandom").disabled=false;
+  $("findRandom").textContent="🔎 ابحث عن شخص";
+  $("cancelSearch").classList.add("hidden");
+ }
+};
+
+// إلغاء البحث أو مغادرة الدردشة
+async function leaveRandomChat(){
+ if(stopMessages)stopMessages();
+ stopMessages=null;
+ currentChat=null;
+ currentFriend=null;
+ randomOpening=false;
+ $("chatBox").classList.add("hidden");
+ $("messages").innerHTML="";
+ $("messageText").value="";
+ $("mediaStatus").textContent="";
+ if(currentUser){
+  try{
+   await setDoc(doc(db,"randomQueue",currentUser.uid),{
+    uid:currentUser.uid,status:"idle",updatedAt:serverTimestamp()
+   },{merge:true});
+  }catch(e){console.log(e);}
+ }
+ randomSearching=false;
+ $("randomStatus").textContent="انتهت المحادثة. يمكنك البحث عن شخص آخر.";
+ $("findRandom").classList.remove("hidden");
+ $("findRandom").disabled=false;
+ $("findRandom").textContent="🔎 ابحث عن شخص";
+ $("cancelSearch").classList.add("hidden");
+ $("nextRandom").classList.add("hidden");
+}
+$("cancelSearch").onclick=leaveRandomChat;
+$("nextRandom").onclick=leaveRandomChat;
+
+// إنشاء معرف المحادثة
+function chatIdFor(a,b){
+ return [a,b].sort().join("_");
+}
+
+// فتح المحادثة
+async function openChat(friendId,name,chatIdOverride=null){
+ try{
+  currentFriend=friendId;
+  currentChat=chatIdOverride || chatIdFor(currentUser.uid,friendId);
+
+  const chatRef=doc(db,"chats",currentChat);
+
+  await setDoc(chatRef,{
+   members:[currentUser.uid,friendId],
+   updatedAt:serverTimestamp()
+  },{merge:true});
+
+  $("chatBox").classList.remove("hidden");
+  $("chatTitle").textContent="المحادثة مع "+name;
+  $("messages").innerHTML="";
+
+  if(stopMessages)stopMessages();
+
+  const messagesQuery=query(
+   collection(db,"chats",currentChat,"messages"),
+   orderBy("createdAt","asc")
+  );
+
+  stopMessages=onSnapshot(messagesQuery,snapshot=>{
+   $("messages").innerHTML="";
+
+   snapshot.forEach(messageDoc=>{
+    const m=messageDoc.data();
+    const item=document.createElement("div");
+    item.className="msg "+(m.sender===currentUser.uid?"mine":"");
+
+    if(m.type==="text"){
+     const text=document.createElement("div");
+     text.textContent=m.text||"";
+     item.append(text);
+    }else if(m.type==="image"||m.type==="video"){
+     const media=m.type==="video"
+      ?document.createElement("video")
+      :document.createElement("img");
+
+     media.src=m.url;
+     if(m.type==="video"){
+      media.controls=true;
+      media.preload="metadata";
+     }else{
+      media.alt="صورة مرسلة";
+     }
+     item.append(media);
+    }
+
+    const info=document.createElement("small");
+    info.textContent=m.sender===currentUser.uid?"أنت":"الصديق";
+    item.append(info);
+    $("messages").append(item);
+   });
+
+   $("messages").scrollTop=$("messages").scrollHeight;
+  });
+
+ }catch(e){
+  status("خطأ في فتح المحادثة: "+e.message);
+ }
+}
+
+// إرسال رسالة نصية
+$("sendMessage").onclick=async()=>{
+ try{
+  const text=$("messageText").value.trim();
+  if(!text||!currentChat)return;
+
+  $("sendMessage").disabled=true;
+
+  await addDoc(
+   collection(db,"chats",currentChat,"messages"),
+   {
+    sender:currentUser.uid,
+    text:text,
+    type:"text",
+    createdAt:serverTimestamp()
+   }
+  );
+
+  $("messageText").value="";
+ }catch(e){
+  status("تعذر إرسال الرسالة: "+e.message);
+ }finally{
+  $("sendMessage").disabled=false;
+ }
+};
+
+// إرسال بالضغط على Enter
+$("messageText").addEventListener("keydown",e=>{
+ if(e.key==="Enter")$("sendMessage").click();
+});
+
+// اختيار صورة أو فيديو
+$("chooseMedia").onclick=()=>{
+ if(!currentChat){
+  status("افتح محادثة أولاً");
+  return;
+ }
+ $("mediaFile").click();
+};
+
+// رفع الصورة أو الفيديو
+$("mediaFile").onchange=async()=>{
+ const file=$("mediaFile").files[0];
+ if(!file)return;
+
+ if(file.size>50*1024*1024){
+  status("الملف أكبر من 50 ميغابايت");
+  $("mediaFile").value="";
+  return;
+ }
+
+ try{
+  $("mediaStatus").textContent="جاري رفع الملف...";
+
+  const type=file.type.startsWith("video/")?"video":"image";
+  if(!file.type.startsWith("video/")&&!file.type.startsWith("image/")){
+   throw new Error("نوع الملف غير مدعوم");
+  }
+
+  const safeName=Date.now()+"_"+file.name.replace(/[^a-zA-Z0-9._-]/g,"_");
+  const path="chatMedia/"+currentUser.uid+"/"+safeName;
+  const storageRef=ref(storage,path);
+
+  await uploadBytes(storageRef,file);
+  const url=await getDownloadURL(storageRef);
+
+  await addDoc(
+   collection(db,"chats",currentChat,"messages"),
+   {
+    sender:currentUser.uid,
+    type:type,
+    url:url,
+    fileName:file.name,
+    createdAt:serverTimestamp()
+   }
+  );
+
+  $("mediaStatus").textContent="تم إرسال الملف";
+ }catch(e){
+  $("mediaStatus").textContent="خطأ: "+e.message;
+ }finally{
+  $("mediaFile").value="";
+ }
+};
+
+// إغلاق المحادثة
+$("closeChat").onclick=leaveRandomChat;
+
+// تسجيل الخروج
+$("logout").onclick=async()=>{
+ if(confirm("هل تريد تسجيل الخروج؟")){
+  await signOut(auth);
+ }
+};
+
+</script>
+</body>
+</html>
