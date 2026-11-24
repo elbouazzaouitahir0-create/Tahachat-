@@ -106,7 +106,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
 
 import {
- getFirestore,doc,setDoc,getDoc,updateDoc,runTransaction,
+ getFirestore,doc,setDoc,getDoc,updateDoc,runTransaction,enableNetwork,
  collection,addDoc,getDocs,onSnapshot,query,where,
  orderBy,serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
@@ -135,8 +135,6 @@ let currentUser=null;
 let currentChat=null;
 let stopMessages=null;
 let stopQueue=null;
-let stopWaitingQueue=null;
-let matchingInProgress=false;
 let randomSearching=false;
 let randomOpening=false;
 let currentFriend=null;
@@ -230,6 +228,11 @@ $("login").onclick=async()=>{
 onAuthStateChanged(auth,async user=>{
  if(user){
   currentUser=user;
+  try{
+   await enableNetwork(db);
+  }catch(networkError){
+   console.warn("تعذر تفعيل اتصال Firestore:",networkError);
+  }
   $("auth").classList.add("hidden");
   $("app").classList.remove("hidden");
   try{
@@ -244,10 +247,8 @@ onAuthStateChanged(auth,async user=>{
   $("auth").classList.remove("hidden");
   if(stopMessages)stopMessages();
   if(stopQueue)stopQueue();
-  if(stopWaitingQueue)stopWaitingQueue();
   stopMessages=null;
   stopQueue=null;
-  stopWaitingQueue=null;
  }
 });
 
@@ -292,75 +293,63 @@ function listenRandomQueue(){
  });
 }
 
-// محاولة مطابقة مستخدمين منتظرين داخل معاملة واحدة
-async function tryMatchWaiting(candidate){
- if(!currentUser || !randomSearching || matchingInProgress || currentChat)return;
- if(!candidate || candidate.id===currentUser.uid)return;
- matchingInProgress=true;
- const myQueueRef=doc(db,"randomQueue",currentUser.uid);
- try{
-  await runTransaction(db,async transaction=>{
-   const mySnap=await transaction.get(myQueueRef);
-   const candidateSnap=await transaction.get(candidate.ref);
-   if(!mySnap.exists() || mySnap.data().status!=="waiting" ||
-      !candidateSnap.exists() || candidateSnap.data().status!=="waiting"){
-    throw new Error("MATCH_ALREADY_TAKEN");
-   }
-   const chatRef=doc(collection(db,"chats"));
-   transaction.set(chatRef,{
-    members:[currentUser.uid,candidate.id],
-    random:true,
-    createdAt:serverTimestamp(),
-    updatedAt:serverTimestamp()
-   });
-   transaction.update(candidate.ref,{
-    status:"matched",peerId:currentUser.uid,chatId:chatRef.id,
-    matchedAt:serverTimestamp()
-   });
-   transaction.update(myQueueRef,{
-    status:"matched",peerId:candidate.id,chatId:chatRef.id,
-    matchedAt:serverTimestamp()
-   });
-  });
- }catch(e){
-  if(e.message!=="MATCH_ALREADY_TAKEN"){
-   console.error("Random matching error:",e);
-   $("randomStatus").textContent="تعذر إتمام المطابقة: "+(e.message||e);
-  }
- }finally{
-  matchingInProgress=false;
- }
-}
-
 // البحث عن شخص ينتظر
 $("findRandom").onclick=async()=>{
  if(!currentUser || randomSearching || currentChat)return;
  randomSearching=true;
  randomOpening=false;
- matchingInProgress=false;
  $("findRandom").disabled=true;
  $("findRandom").textContent="جاري البحث...";
  $("randomStatus").textContent="نبحث عن شخص متاح للدردشة...";
  $("cancelSearch").classList.remove("hidden");
  $("nextRandom").classList.add("hidden");
  const myQueueRef=doc(db,"randomQueue",currentUser.uid);
- const waitingQuery=query(collection(db,"randomQueue"),where("status","==","waiting"));
  try{
-  // سجّل هذا المستخدم في قائمة الانتظار أولاً؛ بعدها يستمع للتغييرات
-  // حتى لا يفوت المستخدم الذي يدخل في نفس اللحظة.
-  await setDoc(myQueueRef,{
-   uid:currentUser.uid,status:"waiting",createdAt:serverTimestamp()
-  });
+  let matched=false;
+  // نبحث عن منتظرين خارج المعاملة، ثم نتحقق داخلها أن المرشح ما زال ينتظر.
+  for(let attempt=0;attempt<3 && !matched;attempt++){
+   const waitingQuery=query(collection(db,"randomQueue"),where("status","==","waiting"));
+   const waitingSnap=await getDocs(waitingQuery);
+   const candidate=waitingSnap.docs.find(item=>item.id!==currentUser.uid);
+   if(!candidate)break;
 
-  if(stopWaitingQueue)stopWaitingQueue();
-  stopWaitingQueue=onSnapshot(waitingQuery,snapshot=>{
-   const candidate=snapshot.docs.find(item=>item.id!==currentUser.uid);
-   if(candidate)tryMatchWaiting(candidate);
-  },error=>{
-   $("randomStatus").textContent="خطأ في متابعة قائمة الانتظار: "+(error.message||error);
-  });
+   try{
+    await runTransaction(db,async transaction=>{
+     const freshCandidate=await transaction.get(candidate.ref);
+     if(!freshCandidate.exists() || freshCandidate.data().status!=="waiting"){
+      throw new Error("MATCH_ALREADY_TAKEN");
+     }
+     const chatRef=doc(collection(db,"chats"));
+     transaction.set(chatRef,{
+      members:[currentUser.uid,candidate.id],
+      random:true,
+      createdAt:serverTimestamp(),
+      updatedAt:serverTimestamp()
+     });
+     transaction.set(candidate.ref,{
+      status:"matched",peerId:currentUser.uid,chatId:chatRef.id,
+      matchedAt:serverTimestamp()
+     },{merge:true});
+     transaction.set(myQueueRef,{
+      uid:currentUser.uid,status:"matched",peerId:candidate.id,
+      chatId:chatRef.id,matchedAt:serverTimestamp()
+     });
+    });
+    matched=true;
+   }catch(matchError){
+    if(matchError.message!=="MATCH_ALREADY_TAKEN")throw matchError;
+   }
+  }
 
-  $("randomStatus").textContent="أنت في قائمة الانتظار. سنفتح المحادثة عند العثور على شخص.";
+  if(!matched){
+   await setDoc(myQueueRef,{
+    uid:currentUser.uid,status:"waiting",createdAt:serverTimestamp()
+   });
+  }
+  const latest=await getDoc(myQueueRef);
+  if(latest.exists() && latest.data().status==="waiting"){
+   $("randomStatus").textContent="أنت في قائمة الانتظار. سنفتح المحادثة عند العثور على شخص.";
+  }
  }catch(e){
   randomSearching=false;
   $("randomStatus").textContent="تعذر بدء البحث: "+(e.message||e);
@@ -374,9 +363,6 @@ $("findRandom").onclick=async()=>{
 // إلغاء البحث أو مغادرة الدردشة
 async function leaveRandomChat(){
  if(stopMessages)stopMessages();
- if(stopWaitingQueue)stopWaitingQueue();
- stopWaitingQueue=null;
- matchingInProgress=false;
  stopMessages=null;
  currentChat=null;
  currentFriend=null;
