@@ -135,7 +135,7 @@ let currentUser=null;
 let currentChat=null;
 let stopMessages=null;
 let stopQueue=null;
-let stopWaitingCandidates=null;
+let stopWaitingQueue=null;
 let matchingInProgress=false;
 let randomSearching=false;
 let randomOpening=false;
@@ -244,8 +244,10 @@ onAuthStateChanged(auth,async user=>{
   $("auth").classList.remove("hidden");
   if(stopMessages)stopMessages();
   if(stopQueue)stopQueue();
+  if(stopWaitingQueue)stopWaitingQueue();
   stopMessages=null;
   stopQueue=null;
+  stopWaitingQueue=null;
  }
 });
 
@@ -273,7 +275,6 @@ function listenRandomQueue(){
   if(data.status==="matched" && data.chatId && data.peerId && !randomOpening){
    randomOpening=true;
    randomSearching=false;
-   if(stopWaitingCandidates){stopWaitingCandidates();stopWaitingCandidates=null;}
    $("randomStatus").textContent="تم العثور على شخص! جاري فتح المحادثة...";
    $("findRandom").classList.add("hidden");
    $("cancelSearch").classList.add("hidden");
@@ -291,20 +292,18 @@ function listenRandomQueue(){
  });
 }
 
-// محاولة مطابقة شخصين من قائمة الانتظار عبر معاملة ذرية
-async function tryMatchRandomCandidate(candidate){
- if(!currentUser || !randomSearching || randomOpening || matchingInProgress) return;
- if(candidate.id===currentUser.uid) return;
+// محاولة مطابقة مستخدمين منتظرين داخل معاملة واحدة
+async function tryMatchWaiting(candidate){
+ if(!currentUser || !randomSearching || matchingInProgress || currentChat)return;
+ if(!candidate || candidate.id===currentUser.uid)return;
  matchingInProgress=true;
  const myQueueRef=doc(db,"randomQueue",currentUser.uid);
  try{
   await runTransaction(db,async transaction=>{
    const mySnap=await transaction.get(myQueueRef);
-   const peerSnap=await transaction.get(candidate.ref);
-   if(!mySnap.exists() || mySnap.data().status!=="waiting"){
-    throw new Error("MY_QUEUE_NOT_WAITING");
-   }
-   if(!peerSnap.exists() || peerSnap.data().status!=="waiting"){
+   const candidateSnap=await transaction.get(candidate.ref);
+   if(!mySnap.exists() || mySnap.data().status!=="waiting" ||
+      !candidateSnap.exists() || candidateSnap.data().status!=="waiting"){
     throw new Error("MATCH_ALREADY_TAKEN");
    }
    const chatRef=doc(collection(db,"chats"));
@@ -324,7 +323,8 @@ async function tryMatchRandomCandidate(candidate){
    });
   });
  }catch(e){
-  if(e.message!=="MATCH_ALREADY_TAKEN" && e.message!=="MY_QUEUE_NOT_WAITING"){
+  if(e.message!=="MATCH_ALREADY_TAKEN"){
+   console.error("Random matching error:",e);
    $("randomStatus").textContent="تعذر إتمام المطابقة: "+(e.message||e);
   }
  }finally{
@@ -332,20 +332,7 @@ async function tryMatchRandomCandidate(candidate){
  }
 }
 
-// مراقبة المنتظرين باستمرار حتى يظهر مستخدم آخر
-function listenWaitingCandidates(){
- if(stopWaitingCandidates) stopWaitingCandidates();
- const waitingQuery=query(collection(db,"randomQueue"),where("status","==","waiting"));
- stopWaitingCandidates=onSnapshot(waitingQuery,snapshot=>{
-  if(!randomSearching || randomOpening || matchingInProgress) return;
-  const candidate=snapshot.docs.find(item=>item.id!==currentUser.uid);
-  if(candidate) tryMatchRandomCandidate(candidate);
- },error=>{
-  $("randomStatus").textContent="تعذر متابعة قائمة الانتظار: "+(error.message||error);
- });
-}
-
-// البحث عن شخص: نسجل المستخدم أولاً ثم نراقب قائمة المنتظرين
+// البحث عن شخص ينتظر
 $("findRandom").onclick=async()=>{
  if(!currentUser || randomSearching || currentChat)return;
  randomSearching=true;
@@ -357,11 +344,22 @@ $("findRandom").onclick=async()=>{
  $("cancelSearch").classList.remove("hidden");
  $("nextRandom").classList.add("hidden");
  const myQueueRef=doc(db,"randomQueue",currentUser.uid);
+ const waitingQuery=query(collection(db,"randomQueue"),where("status","==","waiting"));
  try{
+  // سجّل هذا المستخدم في قائمة الانتظار أولاً؛ بعدها يستمع للتغييرات
+  // حتى لا يفوت المستخدم الذي يدخل في نفس اللحظة.
   await setDoc(myQueueRef,{
    uid:currentUser.uid,status:"waiting",createdAt:serverTimestamp()
   });
-  listenWaitingCandidates();
+
+  if(stopWaitingQueue)stopWaitingQueue();
+  stopWaitingQueue=onSnapshot(waitingQuery,snapshot=>{
+   const candidate=snapshot.docs.find(item=>item.id!==currentUser.uid);
+   if(candidate)tryMatchWaiting(candidate);
+  },error=>{
+   $("randomStatus").textContent="خطأ في متابعة قائمة الانتظار: "+(error.message||error);
+  });
+
   $("randomStatus").textContent="أنت في قائمة الانتظار. سنفتح المحادثة عند العثور على شخص.";
  }catch(e){
   randomSearching=false;
@@ -375,8 +373,10 @@ $("findRandom").onclick=async()=>{
 
 // إلغاء البحث أو مغادرة الدردشة
 async function leaveRandomChat(){
- if(stopWaitingCandidates){stopWaitingCandidates();stopWaitingCandidates=null;}
  if(stopMessages)stopMessages();
+ if(stopWaitingQueue)stopWaitingQueue();
+ stopWaitingQueue=null;
+ matchingInProgress=false;
  stopMessages=null;
  currentChat=null;
  currentFriend=null;
